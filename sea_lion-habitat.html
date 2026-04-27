@@ -1,0 +1,1534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>California Sea Lion Habitat</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #88c3ff; }
+  canvas { display: block; }
+  #hud, #coord-hud, #credit {
+    position: fixed;
+    color: rgba(255,255,255,0.95);
+    font: 13px/1.3 -apple-system, system-ui, "Segoe UI", sans-serif;
+    background: rgba(20,30,50,0.45);
+    padding: 8px 12px;
+    border-radius: 6px;
+    pointer-events: none;
+    letter-spacing: 0.02em;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  }
+  #hud { bottom: 16px; left: 16px; }
+  #coord-hud { bottom: 16px; right: 16px; font-variant-numeric: tabular-nums; min-width: 11ch; text-align: right; }
+  #credit { top: 16px; right: 16px; font-size: 12px; opacity: 0.85; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">California Sea Lion Habitat &mdash; drag to rotate &middot; scroll to zoom &middot; press <b>R</b> to auto-rotate</div>
+<div id="coord-hud">x: -- &nbsp; z: --</div>
+<div id="credit">Made by Mehak Wadhwa</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ============================================================
+// CONFIG — tweak these to reshape the habitat
+// ============================================================
+const POOL_LENGTH       = 26.2;
+const POOL_WIDTH        = 18.2;
+const WALL_OUTER_L      = 30.0;
+const WALL_OUTER_W      = 22.0;
+const WALL_INNER_L      = 29.2;
+const WALL_INNER_W      = 21.2;
+const WALL_HEIGHT       = 1.2;
+const DECK_TOP_Y        = 0.2;
+const DECK_BOTTOM_Y     = -0.5;
+const WATER_Y           = 0.0;
+const POOL_DEPTH        = 3.0;
+const POOL_EDGE_DEPTH   = 0.5;
+const SUN_DIR           = new THREE.Vector3(20, 30, 12);
+
+// ============================================================
+// RENDERER / SCENE / CAMERA / CONTROLS
+// ============================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1500);
+camera.position.set(28, 19, 28);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 1, 0);
+controls.minDistance = 5;
+controls.maxDistance = 60;
+controls.maxPolarAngle = Math.PI / 2 - 0.05;
+// Auto-rotate (presentation mode) — toggled with the 'R' key
+controls.autoRotate = false;
+controls.autoRotateSpeed = 0.7;  // gentle rotation
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'r' || e.key === 'R') {
+    controls.autoRotate = !controls.autoRotate;
+  }
+});
+controls.update();
+
+// ============================================================
+// UTILITIES
+// ============================================================
+function mulberry32(seed) {
+  let s = seed | 0;
+  return function() {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const clamp255 = v => Math.max(0, Math.min(255, Math.round(v)));
+const lerp = (a, b, t) => a + (b - a) * t;
+function smoothstep(e0, e1, x) {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t*t*(3-2*t);
+}
+
+// ============================================================
+// PROCEDURAL CANVAS TEXTURES
+// ============================================================
+function makeNoiseTexture({ size=512, baseColor=[200,200,200], speckle=25, blobs=[], cracks=0, streaks=0 } = {}) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  // base + per-pixel noise
+  const img = ctx.createImageData(size, size);
+  for (let i = 0; i < size*size; i++) {
+    const n = (Math.random() - 0.5) * speckle * 2;
+    img.data[i*4]   = clamp255(baseColor[0] + n);
+    img.data[i*4+1] = clamp255(baseColor[1] + n);
+    img.data[i*4+2] = clamp255(baseColor[2] + n);
+    img.data[i*4+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  // soft color blobs
+  for (const b of blobs) {
+    for (let k = 0; k < b.count; k++) {
+      const x = Math.random() * size, y = Math.random() * size;
+      const r = b.minR + Math.random() * (b.maxR - b.minR);
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(${b.color[0]},${b.color[1]},${b.color[2]},${b.alpha})`);
+      g.addColorStop(1, `rgba(${b.color[0]},${b.color[1]},${b.color[2]},0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, size, size);
+    }
+  }
+  // hairline cracks
+  for (let k = 0; k < cracks; k++) {
+    ctx.strokeStyle = `rgba(40,35,30,${0.06 + Math.random()*0.12})`;
+    ctx.lineWidth = 0.4 + Math.random() * 1.2;
+    ctx.beginPath();
+    let x = Math.random() * size, y = Math.random() * size;
+    ctx.moveTo(x, y);
+    for (let s = 0; s < 4; s++) {
+      x += (Math.random() - 0.5) * 80;
+      y += (Math.random() - 0.5) * 80;
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  // long horizontal streaks (good for stratified rock / weathered concrete)
+  for (let k = 0; k < streaks; k++) {
+    const y = Math.random() * size;
+    const len = size * (0.3 + Math.random() * 0.7);
+    const x0 = Math.random() * size;
+    ctx.strokeStyle = `rgba(${30 + Math.random()*60},${25 + Math.random()*40},${20 + Math.random()*30},${0.05 + Math.random()*0.18})`;
+    ctx.lineWidth = 0.5 + Math.random() * 2;
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    for (let s = 0; s < 6; s++) {
+      ctx.lineTo(x0 + len * (s+1)/6, y + (Math.random() - 0.5) * 8);
+    }
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+const concreteWallTex = makeNoiseTexture({
+  size: 512, baseColor: [222, 216, 200], speckle: 18,
+  blobs: [
+    { count: 70, minR: 8, maxR: 38, color: [180,170,150], alpha: 0.32 },
+    { count: 25, minR: 40, maxR: 110, color: [240,235,225], alpha: 0.35 },
+    { count: 40, minR: 4, maxR: 14, color: [120,115,100], alpha: 0.55 }
+  ],
+  cracks: 18, streaks: 6
+});
+
+const deckTex = makeNoiseTexture({
+  size: 512, baseColor: [188, 178, 158], speckle: 16,
+  blobs: [
+    { count: 100, minR: 10, maxR: 45, color: [150,140,120], alpha: 0.3 },
+    { count: 30, minR: 40, maxR: 110, color: [205,195,175], alpha: 0.3 },
+    { count: 60, minR: 3, maxR: 9, color: [110,100,85], alpha: 0.45 }
+  ],
+  cracks: 14
+});
+
+const basinTex = makeNoiseTexture({
+  size: 512, baseColor: [120, 180, 178], speckle: 12,
+  blobs: [
+    { count: 60, minR: 20, maxR: 70, color: [85,150,150], alpha: 0.32 },
+    { count: 30, minR: 40, maxR: 110, color: [150,205,200], alpha: 0.3 },
+    { count: 80, minR: 3, maxR: 10, color: [70,130,135], alpha: 0.35 }
+  ]
+});
+
+// Haul-out rocks at Central Park Zoo are pale tan/cream sandstone-tinted concrete
+const rockTex = makeNoiseTexture({
+  size: 512, baseColor: [205, 188, 158], speckle: 16,
+  blobs: [
+    { count: 95, minR: 18, maxR: 65, color: [165, 148, 118], alpha: 0.34 },
+    { count: 40, minR: 30, maxR: 95, color: [225, 210, 180], alpha: 0.30 },
+    { count: 30, minR: 5, maxR: 20, color: [115, 95, 70],   alpha: 0.40 },
+    { count: 15, minR: 12, maxR: 30, color: [85, 105, 60],  alpha: 0.18 }  // light moss
+  ],
+  cracks: 22, streaks: 10
+});
+
+// waterline / wet rocks: same tan but darker (wet sandstone)
+const wetRockTex = makeNoiseTexture({
+  size: 512, baseColor: [140, 122, 95], speckle: 16,
+  blobs: [
+    { count: 85, minR: 16, maxR: 60, color: [95,  82,  60], alpha: 0.40 },
+    { count: 35, minR: 30, maxR: 95, color: [175, 158, 125], alpha: 0.30 },
+    { count: 25, minR: 8, maxR: 22,  color: [60,  90,  55], alpha: 0.26 }  // damp algae
+  ],
+  cracks: 16, streaks: 14
+});
+
+const grassTex = makeNoiseTexture({
+  size: 512, baseColor: [82, 128, 58], speckle: 32,
+  blobs: [
+    { count: 220, minR: 5, maxR: 22, color: [55,98,38], alpha: 0.45 },
+    { count: 110, minR: 10, maxR: 30, color: [115,165,80], alpha: 0.3 },
+    { count: 70, minR: 3, maxR: 12, color: [140,180,90], alpha: 0.35 },
+    { count: 30, minR: 8, maxR: 20, color: [100,80,55], alpha: 0.25 }   // dirt patches
+  ]
+});
+
+const dirtTex = makeNoiseTexture({
+  size: 512, baseColor: [120, 95, 65], speckle: 26,
+  blobs: [
+    { count: 100, minR: 8, maxR: 30, color: [85,65,40], alpha: 0.45 },
+    { count: 40, minR: 20, maxR: 60, color: [150,120,80], alpha: 0.3 }
+  ]
+});
+
+const sandTex = makeNoiseTexture({
+  size: 512, baseColor: [168, 152, 122], speckle: 18,
+  blobs: [
+    { count: 80, minR: 10, maxR: 40, color: [140,125,100], alpha: 0.3 },
+    { count: 40, minR: 4, maxR: 12, color: [110,98,80], alpha: 0.4 },
+    { count: 25, minR: 20, maxR: 50, color: [195,180,150], alpha: 0.28 }
+  ]
+});
+
+const pavedTex = makeNoiseTexture({
+  size: 512, baseColor: [150, 145, 138], speckle: 20,
+  blobs: [
+    { count: 100, minR: 6, maxR: 22, color: [105,100,95], alpha: 0.4 },
+    { count: 30, minR: 30, maxR: 80, color: [175,170,160], alpha: 0.3 }
+  ],
+  cracks: 22
+});
+
+// soft circular sprite (clouds + leaves use this kind of shape)
+function makeSoftDisc(color = [255,255,255], inner = 1.0, outer = 0.0) {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, `rgba(${color[0]},${color[1]},${color[2]},${inner})`);
+  g.addColorStop(1, `rgba(${color[0]},${color[1]},${color[2]},${outer})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const cloudTex = makeSoftDisc([255,255,255], 0.85, 0.0);
+
+// ============================================================
+// SKY DOME
+// ============================================================
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: {
+    topColor:     { value: new THREE.Color(0x4488dd) },
+    horizonColor: { value: new THREE.Color(0xddebff) }
+  },
+  vertexShader: `
+    varying vec3 vDir;
+    void main() {
+      vDir = normalize(position);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 topColor;
+    uniform vec3 horizonColor;
+    varying vec3 vDir;
+    void main() {
+      float h = clamp(vDir.y, 0.0, 1.0);
+      vec3 c = mix(horizonColor, topColor, smoothstep(0.0, 0.7, h));
+      gl_FragColor = vec4(c, 1.0);
+    }
+  `,
+  side: THREE.BackSide,
+  depthWrite: false
+});
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(800, 32, 16), skyMat));
+
+// distant clouds (sprites)
+{
+  const rng = mulberry32(57);
+  for (let i = 0; i < 30; i++) {
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: cloudTex, color: 0xffffff, transparent: true, opacity: 0.55 + rng() * 0.3,
+      depthWrite: false
+    }));
+    const ang = rng() * Math.PI * 2;
+    const dist = 250 + rng() * 280;
+    sp.position.set(Math.cos(ang) * dist, 90 + rng() * 90, Math.sin(ang) * dist);
+    const s = 40 + rng() * 80;
+    sp.scale.set(s, s * (0.4 + rng() * 0.3), 1);
+    scene.add(sp);
+  }
+}
+
+// ============================================================
+// LIGHTING
+// ============================================================
+scene.add(new THREE.HemisphereLight(0x9ec7ff, 0xb09060, 0.7));
+
+const sun = new THREE.DirectionalLight(0xfff0d8, 2.2);
+sun.position.copy(SUN_DIR);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -32;
+sun.shadow.camera.right = 32;
+sun.shadow.camera.top = 32;
+sun.shadow.camera.bottom = -32;
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = 110;
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.02;
+scene.add(sun);
+scene.add(sun.target);
+
+// fill light from opposite side
+const fill = new THREE.DirectionalLight(0xa6c7e6, 0.35);
+fill.position.set(-15, 18, -10);
+scene.add(fill);
+
+// ============================================================
+// STADIUM HELPERS
+// ============================================================
+function stadiumPoints(L, W, segments = 64) {
+  const R = W / 2;
+  const sh = L / 2 - R;
+  const pts = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = -Math.PI/2 + (i / segments) * Math.PI;
+    pts.push(new THREE.Vector2(sh + Math.cos(a) * R, Math.sin(a) * R));
+  }
+  for (let i = 0; i <= segments; i++) {
+    const a = Math.PI/2 + (i / segments) * Math.PI;
+    pts.push(new THREE.Vector2(-sh + Math.cos(a) * R, Math.sin(a) * R));
+  }
+  return pts;
+}
+function distToStadiumEdge(x, z, L, W) {
+  const R = W / 2;
+  const sh = L / 2 - R;
+  if (Math.abs(x) <= sh) return R - Math.abs(z);
+  const dx = Math.abs(x) - sh;
+  return R - Math.sqrt(dx*dx + z*z);
+}
+const isInStadium = (x, z, L, W) => distToStadiumEdge(x, z, L, W) >= 0;
+
+function createStadiumGrid(L, W, segX, segZ, yFunc) {
+  const positions = [], indices = [], uvs = [];
+  const idMap = new Map();
+  const halfL = L/2, halfW = W/2;
+  for (let i = 0; i <= segX; i++) {
+    for (let j = 0; j <= segZ; j++) {
+      const x = -halfL + (i / segX) * L;
+      const z = -halfW + (j / segZ) * W;
+      if (!isInStadium(x, z, L, W)) continue;
+      const id = i * (segZ + 1) + j;
+      idMap.set(id, positions.length / 3);
+      positions.push(x, yFunc(x, z), z);
+      uvs.push((x + halfL) / L, (z + halfW) / W);
+    }
+  }
+  for (let i = 0; i < segX; i++) {
+    for (let j = 0; j < segZ; j++) {
+      const a = i * (segZ + 1) + j;
+      const b = a + 1;
+      const c = a + (segZ + 1);
+      const d = c + 1;
+      const va = idMap.get(a), vb = idMap.get(b), vc = idMap.get(c), vd = idMap.get(d);
+      if (va !== undefined && vb !== undefined && vc !== undefined && vd !== undefined) {
+        indices.push(va, vb, vc);
+        indices.push(vb, vd, vc);
+      }
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
+function worldUV(geom, su = 4, sv = 4, useY = false) {
+  const pos = geom.attributes.position;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[i*2]   = (pos.getX(i) + (useY ? pos.getZ(i) : 0)) / su;
+    uv[i*2+1] = (useY ? pos.getY(i) : pos.getZ(i)) / sv;
+  }
+  geom.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
+
+// ============================================================
+// LANDSCAPE FUNCTIONS (basin bowl shape)
+// ============================================================
+function basinY(x, z) {
+  const dPool = distToStadiumEdge(x, z, POOL_LENGTH, POOL_WIDTH);
+  if (dPool < 0) return -POOL_EDGE_DEPTH - 0.05;
+  const R = POOL_WIDTH / 2;
+  const t = Math.min(1, dPool / R);
+  const depth = POOL_EDGE_DEPTH + (POOL_DEPTH - POOL_EDGE_DEPTH) * (1 - Math.pow(1 - t, 1.6));
+  const bumps = Math.sin(x * 1.1) * Math.cos(z * 1.6) * 0.05
+              + Math.sin((x + z) * 0.7) * 0.04
+              + Math.sin(x * 2.3 + z * 1.7) * 0.03;
+  return -depth + bumps;
+}
+// ============================================================
+// OUTER GROUND (concrete-ish, around the enclosure)
+// Per latest user note: "make it more like the pics, like normal
+// concretish color nothing special round there." Uses pavedTex for the
+// whole outside area instead of the previous sand.
+// ============================================================
+{
+  const shape = new THREE.Shape();
+  shape.moveTo(-200, -200);
+  shape.lineTo( 200, -200);
+  shape.lineTo( 200,  200);
+  shape.lineTo(-200,  200);
+  shape.lineTo(-200, -200);
+  shape.holes.push(new THREE.Path(stadiumPoints(WALL_OUTER_L, WALL_OUTER_W, 64).slice().reverse()));
+  const geom = new THREE.ShapeGeometry(shape, 6);
+  geom.rotateX(-Math.PI / 2);
+  geom.translate(0, DECK_TOP_Y, 0);
+  worldUV(geom, 5, 5);
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    map: pavedTex, color: 0xb6b3ad, roughness: 0.95, metalness: 0
+  }));
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+// paved walking ring outside the wall, between the two hedge rings
+{
+  const outer = stadiumPoints(WALL_OUTER_L + 9.0, WALL_OUTER_W + 9.0, 64);
+  const inner = stadiumPoints(WALL_OUTER_L + 1.6,  WALL_OUTER_W + 1.6,  64).slice().reverse();
+  const shape = new THREE.Shape(outer);
+  shape.holes.push(new THREE.Path(inner));
+  const geom = new THREE.ShapeGeometry(shape, 6);
+  geom.rotateX(-Math.PI / 2);
+  geom.translate(0, DECK_TOP_Y + 0.005, 0);
+  worldUV(geom, 4, 4);
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    map: pavedTex, roughness: 0.95
+  }));
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+
+// ============================================================
+// HEDGE RINGS — two concentric green hedges around the outside
+// of the wall. Per the reference photos these bracket the
+// pedestrian walkway and visually merge into the back of the
+// big rock formation where they meet the enclosure.
+// ============================================================
+function placeHedgeRing(offsetFromWall, count, opts = {}) {
+  const {
+    jitter = 0.18, baseSize = 0.55, sizeVar = 0.30, hueShift = 0,
+    satBase = 0.55, lightBase = 0.26, y = DECK_TOP_Y
+  } = opts;
+  const rng = mulberry32(60606 + Math.round(offsetFromWall * 100 + y * 13));
+  const path = stadiumPoints(WALL_OUTER_L + offsetFromWall * 2, WALL_OUTER_W + offsetFromWall * 2, count);
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i];
+    const r = baseSize + rng() * sizeVar;
+    const jx = (rng() - 0.5) * jitter;
+    const jz = (rng() - 0.5) * jitter;
+    const geomKind = rng();
+    let g;
+    if (geomKind < 0.55) g = new THREE.IcosahedronGeometry(r, 1);
+    else if (geomKind < 0.85) g = new THREE.SphereGeometry(r, 9, 7);
+    else g = new THREE.DodecahedronGeometry(r, 0);
+    const pos = g.attributes.position;
+    for (let v = 0; v < pos.count; v++) {
+      const x0 = pos.getX(v), y0 = pos.getY(v), z0 = pos.getZ(v);
+      const n = Math.sin(x0*3 + i) * Math.cos(y0*3) * Math.sin(z0*3 + 1);
+      const s = 1 + n * 0.18;
+      pos.setXYZ(v, x0*s, y0*s, z0*s);
+    }
+    g.computeVertexNormals();
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(0.27 + hueShift + rng() * 0.06, satBase + rng() * 0.20, lightBase + rng() * 0.13),
+      roughness: 1, flatShading: true
+    }));
+    m.position.set(p.x + jx, y + r * 0.55, p.y + jz);
+    m.scale.y = 0.7 + rng() * 0.45;
+    m.rotation.y = rng() * Math.PI * 2;
+    m.castShadow = true;
+    m.receiveShadow = true;
+    scene.add(m);
+  }
+}
+// INNER ring: planter ON TOP OF THE WALL (this is the green strip seen between
+// the wall and the railing in the reference photo — boxwood-style trim hedge)
+placeHedgeRing(-0.2, 150, {
+  baseSize: 0.42, sizeVar: 0.20, jitter: 0.10,
+  satBase: 0.55, lightBase: 0.28,
+  y: DECK_TOP_Y + WALL_HEIGHT + 0.04
+});
+// (Outer hedge ring removed per user — the area beyond the railing is
+// just plain paved walkway / sand, no decorative greenery.)
+
+// ============================================================
+// RAILING — black metal posts + 2 horizontal bars around the wall top.
+// Posts emerge from the wall just outside the inner hedge.
+// ============================================================
+{
+  const railMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1c, roughness: 0.45, metalness: 0.7 });
+  const railTopY = DECK_TOP_Y + WALL_HEIGHT + 0.95;
+  const railMidY = DECK_TOP_Y + WALL_HEIGHT + 0.55;
+  // posts on the wall outer edge
+  const postPath = stadiumPoints(WALL_OUTER_L - 0.05, WALL_OUTER_W - 0.05, 90);
+  for (let i = 0; i < postPath.length; i++) {
+    const p = postPath[i];
+    const post = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.035, 0.035, 1.0, 6),
+      railMat
+    );
+    post.position.set(p.x, DECK_TOP_Y + WALL_HEIGHT + 0.5, p.y);
+    post.castShadow = true;
+    scene.add(post);
+  }
+  // continuous horizontal rails — TubeGeometry along a closed CatmullRom curve
+  const barPath = stadiumPoints(WALL_OUTER_L - 0.05, WALL_OUTER_W - 0.05, 120);
+  // dedup last==first for closed curve
+  const pts3Top = barPath.map(p => new THREE.Vector3(p.x, railTopY, p.y));
+  const pts3Mid = barPath.map(p => new THREE.Vector3(p.x, railMidY, p.y));
+  // closed CatmullRom expects no duplicate end point
+  const curveTop = new THREE.CatmullRomCurve3(pts3Top, true, 'catmullrom', 0.5);
+  const curveMid = new THREE.CatmullRomCurve3(pts3Mid, true, 'catmullrom', 0.5);
+  const railTop = new THREE.Mesh(new THREE.TubeGeometry(curveTop, 240, 0.028, 6, true), railMat);
+  const railMid = new THREE.Mesh(new THREE.TubeGeometry(curveMid, 240, 0.024, 6, true), railMat);
+  railTop.castShadow = true;
+  railMid.castShadow = true;
+  scene.add(railTop);
+  scene.add(railMid);
+}
+
+// ============================================================
+// CITY SKYLINE BACKDROP — a ring of distant building boxes
+// ============================================================
+{
+  const skyline = new THREE.Group();
+  const rng = mulberry32(31);
+  const materials = [];
+  for (let i = 0; i < 6; i++) {
+    materials.push(new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(0.58 + rng() * 0.06, 0.18 + rng() * 0.12, 0.40 + rng() * 0.18),
+      roughness: 0.85, metalness: 0.05
+    }));
+  }
+  // closer denser ring (zoo facility buildings + low rises)
+  for (let i = 0; i < 36; i++) {
+    const ang = (i / 36) * Math.PI * 2 + rng() * 0.07;
+    const r = 60 + rng() * 25;
+    const w = 5 + rng() * 7;
+    const h = 6 + rng() * 14;
+    const d = 5 + rng() * 7;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), materials[Math.floor(rng() * materials.length)]);
+    m.position.set(Math.cos(ang) * r, h/2 + 0.2, Math.sin(ang) * r);
+    m.rotation.y = rng() * Math.PI;
+    skyline.add(m);
+  }
+  // far skyscraper ring
+  for (let i = 0; i < 28; i++) {
+    const ang = (i / 28) * Math.PI * 2 + rng() * 0.12;
+    const r = 130 + rng() * 70;
+    const w = 6 + rng() * 9;
+    const h = 22 + rng() * 50;
+    const d = 6 + rng() * 9;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), materials[Math.floor(rng() * materials.length)]);
+    m.position.set(Math.cos(ang) * r, h/2 + 0.2, Math.sin(ang) * r);
+    m.rotation.y = rng() * Math.PI;
+    // slight color variation per building
+    skyline.add(m);
+    // occasional rooftop block (water tower / vent)
+    if (rng() < 0.4) {
+      const t = new THREE.Mesh(new THREE.BoxGeometry(w*0.4, 2 + rng()*3, d*0.4),
+        materials[Math.floor(rng() * materials.length)]);
+      t.position.copy(m.position);
+      t.position.y = h + 1;
+      skyline.add(t);
+    }
+  }
+  scene.add(skyline);
+}
+
+// ============================================================
+// TREES OUTSIDE THE WALL
+// trunk = tapered cylinder, foliage = stacked deformed icospheres
+// ============================================================
+const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5a4030, roughness: 1 });
+
+function makeTree(x, z, opts = {}) {
+  const { h = 4.5, fr = 1.7, seed = 1 } = opts;
+  const g = new THREE.Group();
+  const rng = mulberry32(seed);
+
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.16, 0.28, h * 0.55, 7),
+    trunkMat
+  );
+  trunk.position.y = h * 0.275;
+  trunk.castShadow = true;
+  trunk.receiveShadow = true;
+  g.add(trunk);
+
+  // foliage as 3-5 lumpy icosahedrons stacked
+  const lumps = 3 + Math.floor(rng() * 3);
+  for (let i = 0; i < lumps; i++) {
+    const lr = fr * (0.85 - i * 0.08) + (rng() - 0.5) * 0.2;
+    const geom = new THREE.IcosahedronGeometry(lr, 1);
+    const pos = geom.attributes.position;
+    for (let v = 0; v < pos.count; v++) {
+      const x0 = pos.getX(v), y0 = pos.getY(v), z0 = pos.getZ(v);
+      const n = Math.sin(x0*2 + i) * Math.cos(y0*2 + i*2) * Math.sin(z0*2);
+      const s = 1 + n * 0.18;
+      pos.setXYZ(v, x0*s, y0*s, z0*s);
+    }
+    geom.computeVertexNormals();
+    const lump = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(0.27 + rng()*0.06, 0.5 + rng()*0.2, 0.24 + rng()*0.12),
+      roughness: 1, flatShading: true
+    }));
+    lump.position.set(
+      (rng() - 0.5) * 0.5,
+      h * 0.55 + i * fr * 0.55,
+      (rng() - 0.5) * 0.5
+    );
+    lump.castShadow = true;
+    lump.receiveShadow = true;
+    g.add(lump);
+  }
+  g.position.set(x, DECK_TOP_Y, z);
+  g.rotation.y = rng() * Math.PI * 2;
+  return g;
+}
+
+// Bare leafless tree (matches the bare tree visible inside the seal exhibit
+// in the reference photo — just trunk + branching, no foliage)
+function makeBareTree(x, z, opts = {}) {
+  const { h = 4.0, branches = 9, seed = 1 } = opts;
+  const g = new THREE.Group();
+  const rng = mulberry32(seed);
+  // tapered trunk, slightly tilted for character
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.10, 0.20, h, 8),
+    trunkMat
+  );
+  trunk.position.y = h / 2;
+  trunk.rotation.z = (rng() - 0.5) * 0.08;
+  trunk.castShadow = true;
+  trunk.receiveShadow = true;
+  g.add(trunk);
+  // build branches as thin tapered cylinders pointed outward+upward
+  const up = new THREE.Vector3(0, 1, 0);
+  for (let i = 0; i < branches; i++) {
+    const len = 0.9 + rng() * 1.4;
+    const ang = rng() * Math.PI * 2;
+    const elev = 0.45 + rng() * 0.65;             // up-elevation in radians
+    const dir = new THREE.Vector3(
+      Math.sin(ang) * Math.cos(elev),
+      Math.sin(elev),
+      Math.cos(ang) * Math.cos(elev)
+    ).normalize();
+    const start = new THREE.Vector3(0, h * (0.55 + rng() * 0.42), 0);
+    const branch = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.018, 0.06 + rng() * 0.03, len, 5),
+      trunkMat
+    );
+    branch.quaternion.setFromUnitVectors(up, dir);
+    branch.position.copy(start.clone().add(dir.clone().multiplyScalar(len / 2)));
+    branch.castShadow = true;
+    g.add(branch);
+    // optional twig at end
+    if (rng() < 0.7) {
+      const tlen = 0.3 + rng() * 0.6;
+      const twigDir = dir.clone()
+        .add(new THREE.Vector3((rng()-0.5)*0.8, rng()*0.4, (rng()-0.5)*0.8))
+        .normalize();
+      const tip = start.clone().add(dir.clone().multiplyScalar(len));
+      const twig = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.008, 0.018, tlen, 4),
+        trunkMat
+      );
+      twig.quaternion.setFromUnitVectors(up, twigDir);
+      twig.position.copy(tip.clone().add(twigDir.clone().multiplyScalar(tlen / 2)));
+      twig.castShadow = true;
+      g.add(twig);
+    }
+  }
+  g.position.set(x, DECK_TOP_Y, z);
+  g.rotation.y = rng() * Math.PI * 2;
+  return g;
+}
+
+{
+  // place ~14 trees outside the wall, pushed back from the paved ring
+  const trees = [
+    [-22, -16,  5.0, 1.9],
+    [-28,  -2,  4.5, 1.6],
+    [-26,  10,  5.5, 2.1],
+    [-15,  17,  4.0, 1.5],
+    [  3,  19,  5.0, 1.8],
+    [ 18,  17,  4.6, 1.7],
+    [ 27,   8,  5.2, 1.8],
+    [ 28,  -6,  4.4, 1.6],
+    [ 22, -17,  5.0, 1.9],
+    [  5, -18,  4.0, 1.5],
+    [-10, -19,  4.7, 1.7],
+    [-32,   4,  6.0, 2.3],
+    [ 32,   2,  5.8, 2.2],
+    [-19,  19,  4.2, 1.7],
+  ];
+  trees.forEach(([x, z, h, fr], i) => scene.add(makeTree(x, z, { h, fr, seed: 100 + i * 7 })));
+}
+
+// ============================================================
+// ENCLOSURE WALL (extruded stadium ring) + dark coping cap
+// ============================================================
+{
+  const shape = new THREE.Shape(stadiumPoints(WALL_OUTER_L, WALL_OUTER_W, 64));
+  shape.holes.push(new THREE.Path(stadiumPoints(WALL_INNER_L, WALL_INNER_W, 64).slice().reverse()));
+  const geom = new THREE.ExtrudeGeometry(shape, { depth: WALL_HEIGHT, bevelEnabled: false, curveSegments: 32 });
+  geom.rotateX(-Math.PI / 2);
+  geom.translate(0, DECK_TOP_Y, 0);
+  worldUV(geom, 4, 1.5, true);
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    map: concreteWallTex, roughness: 0.95, metalness: 0
+  }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+// thin darker coping on top of the wall
+{
+  const outer = stadiumPoints(WALL_OUTER_L + 0.1, WALL_OUTER_W + 0.1, 64);
+  const inner = stadiumPoints(WALL_INNER_L - 0.1, WALL_INNER_W - 0.1, 64).slice().reverse();
+  const shape = new THREE.Shape(outer);
+  shape.holes.push(new THREE.Path(inner));
+  const geom = new THREE.ExtrudeGeometry(shape, { depth: 0.08, bevelEnabled: false, curveSegments: 32 });
+  geom.rotateX(-Math.PI / 2);
+  geom.translate(0, DECK_TOP_Y + WALL_HEIGHT, 0);
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    color: 0x4a4239, roughness: 0.6, metalness: 0.05
+  }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+
+// ============================================================
+// DECK (ring between wall and pool, doubles as side wall to edge depth)
+// Per the latest user note: this inner ring just inside the fence is
+// rendered as IRON (dark gray, low roughness, metallic) — and a raised
+// iron lip is added at the pool boundary so it reads as a moat-style
+// edge that seals can't easily climb out of.
+// ============================================================
+{
+  const shape = new THREE.Shape(stadiumPoints(WALL_INNER_L, WALL_INNER_W, 64));
+  shape.holes.push(new THREE.Path(stadiumPoints(POOL_LENGTH, POOL_WIDTH, 64).slice().reverse()));
+  const depth = DECK_TOP_Y - DECK_BOTTOM_Y;
+  const geom = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 32 });
+  geom.rotateX(-Math.PI / 2);
+  geom.translate(0, DECK_BOTTOM_Y, 0);
+  worldUV(geom, 6, 6);
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    color: 0x444a52, roughness: 0.45, metalness: 0.75
+  }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+// Raised iron LIP along the pool edge — sits on top of the deck inner
+// ring, rises ~0.4m above deck level, ~0.55m wide. Acts as the visual
+// barrier between the deck and the pool ("extra ditch spot").
+{
+  const outer = stadiumPoints(POOL_LENGTH + 1.1, POOL_WIDTH + 1.1, 64);
+  const inner = stadiumPoints(POOL_LENGTH + 0.05, POOL_WIDTH + 0.05, 64).slice().reverse();
+  const shape = new THREE.Shape(outer);
+  shape.holes.push(new THREE.Path(inner));
+  const lipHeight = 0.40;
+  const geom = new THREE.ExtrudeGeometry(shape, { depth: lipHeight, bevelEnabled: false, curveSegments: 32 });
+  geom.rotateX(-Math.PI / 2);
+  geom.translate(0, DECK_TOP_Y, 0);
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    color: 0x383e45, roughness: 0.40, metalness: 0.80
+  }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+
+// ============================================================
+// POOL BASIN (bowl)
+// ============================================================
+{
+  const geom = createStadiumGrid(POOL_LENGTH + 0.6, POOL_WIDTH + 0.6, 110, 80, basinY);
+  const pos = geom.attributes.position;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[i*2]   = pos.getX(i) / 4;
+    uv[i*2+1] = pos.getZ(i) / 4;
+  }
+  geom.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    map: basinTex, roughness: 0.7, metalness: 0, side: THREE.DoubleSide
+  }));
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+
+// ============================================================
+// WATER SURFACE (custom shader: animated waves + fresnel)
+// ============================================================
+const waterMat = new THREE.ShaderMaterial({
+  uniforms: {
+    time:       { value: 0 },
+    waterColor: { value: new THREE.Color(0x3da7b3) },
+    sunDir:     { value: SUN_DIR.clone().normalize() },
+    camPos:     { value: new THREE.Vector3() }
+  },
+  vertexShader: `
+    uniform float time;
+    varying vec3 vWorldPos;
+    varying vec3 vN;
+    varying float vH;
+    float wv(vec2 p) {
+      return sin(p.x * 0.42 + time * 1.05) * 0.05
+           + sin(p.y * 0.61 + time * 0.75) * 0.04
+           + sin((p.x + p.y) * 0.31 + time * 1.30) * 0.04
+           + sin((p.x - p.y) * 0.55 + time * 0.55) * 0.03
+           + sin(p.x * 1.7 + p.y * 0.4 + time * 1.9) * 0.018;
+    }
+    void main() {
+      vec3 p = position;
+      float h = wv(p.xz);
+      p.y += h;
+      vH = h;
+      float e = 0.5;
+      float dx = wv(p.xz + vec2(e, 0.0)) - wv(p.xz - vec2(e, 0.0));
+      float dz = wv(p.xz + vec2(0.0, e)) - wv(p.xz - vec2(0.0, e));
+      vN = normalize(vec3(-dx / (2.0 * e), 1.0, -dz / (2.0 * e)));
+      vec4 wp = modelMatrix * vec4(p, 1.0);
+      vWorldPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 waterColor;
+    uniform vec3 sunDir;
+    uniform vec3 camPos;
+    varying vec3 vWorldPos;
+    varying vec3 vN;
+    varying float vH;
+    void main() {
+      vec3 n = normalize(vN);
+      vec3 v = normalize(camPos - vWorldPos);
+      vec3 l = normalize(sunDir);
+      float diff = max(dot(n, l), 0.0);
+      vec3 r = reflect(-l, n);
+      float spec = pow(max(dot(v, r), 0.0), 70.0);
+      float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+      vec3 col = waterColor * (0.55 + 0.45 * diff);
+      col += vec3(1.0) * spec * 0.95;
+      col += vec3(0.85, 0.93, 1.0) * fres * 0.30;
+      col += waterColor * vH * 0.5;
+      gl_FragColor = vec4(col, 0.50);
+    }
+  `,
+  transparent: true,
+  side: THREE.DoubleSide,
+  depthWrite: false
+});
+{
+  const geom = createStadiumGrid(POOL_LENGTH + 0.4, POOL_WIDTH + 0.4, 90, 64, () => 0);
+  const water = new THREE.Mesh(geom, waterMat);
+  water.position.y = WATER_Y;
+  water.renderOrder = 2;
+  scene.add(water);
+}
+
+// ============================================================
+// ROCK MATERIALS + LEGACY ROCK HELPERS (used for pebbles, etc.)
+// ============================================================
+const rockMat = new THREE.MeshStandardMaterial({
+  map: rockTex, roughness: 0.94, metalness: 0.04
+});
+const wetRockMat = new THREE.MeshStandardMaterial({
+  map: wetRockTex, roughness: 0.7, metalness: 0.08
+});
+function makeRockGeom({ sx=1, sy=1, sz=1, segments=24, deform=0.28, seed=1 }) {
+  const geom = new THREE.SphereGeometry(1, segments, Math.max(10, Math.floor(segments * 0.7)));
+  const pos = geom.attributes.position;
+  const rng = mulberry32(seed);
+  const o = Array.from({length: 8}, () => rng() * 10);
+  for (let i = 0; i < pos.count; i++) {
+    const x0 = pos.getX(i), y0 = pos.getY(i), z0 = pos.getZ(i);
+    const n1 = Math.sin(x0*1.7 + o[0]) * Math.cos(y0*1.9 + o[1]) * Math.sin(z0*1.5 + o[2]);
+    const n2 = Math.sin(x0*4.3 + o[3]) * Math.cos(z0*3.7 + o[4]) * Math.sin(y0*4.0 + o[5]);
+    const n3 = Math.sin(x0*8.5 + o[1]) * Math.cos(y0*7.1 + o[3]) * 0.4;
+    const n4 = Math.sin(x0*15.0 + o[6]) * Math.sin(y0*13.0 + o[7]) * 0.18;
+    const d = n1 * deform + n2 * deform * 0.45 + n3 * deform * 0.22 + n4 * deform * 0.12;
+    const r = 1 + d;
+    pos.setXYZ(i, x0 * r * sx, y0 * r * sy, z0 * r * sz);
+  }
+  geom.computeVertexNormals();
+  return geom;
+}
+function makeRock(opts, pos, rotY = 0, mat = rockMat) {
+  const m = new THREE.Mesh(makeRockGeom(opts), mat);
+  m.position.set(pos[0], pos[1], pos[2]);
+  m.rotation.y = rotY;
+  m.castShadow = true;
+  m.receiveShadow = true;
+  return m;
+}
+
+// ============================================================
+// TOPOGRAPHIC SLAB ROCK SYSTEM
+// The sketch shows rocks with concentric contour lines — these
+// represent stacked flat slabs (each contour = one slab level).
+// We model rocks as a small group of flat-topped extruded slabs,
+// each slightly smaller than the one below, with bevelled edges.
+// ============================================================
+function noisyEllipseOutline(rx, rz, segments, seed, noiseAmt = 0.10) {
+  const rng = mulberry32(seed);
+  const phase1 = rng() * Math.PI * 2;
+  const phase2 = rng() * Math.PI * 2;
+  const pts = [];
+  for (let i = 0; i < segments; i++) {
+    const t = (i / segments) * Math.PI * 2;
+    const n = 1 + Math.sin(t * 5 + phase1) * noiseAmt
+                + Math.sin(t * 9 + phase2) * noiseAmt * 0.5;
+    pts.push(new THREE.Vector2(rx * n * Math.cos(t), rz * n * Math.sin(t)));
+  }
+  return pts;
+}
+function teardropOutline(width, length, segments, seed, noiseAmt = 0.07) {
+  const rng = mulberry32(seed);
+  const pts = [];
+  for (let i = 0; i < segments; i++) {
+    const t = (i / segments) * Math.PI * 2;
+    const cosT = Math.cos(t), sinT = Math.sin(t);
+    let x, y;
+    if (sinT >= 0) {
+      // pointed tip on +Y
+      const k = Math.pow(sinT, 1.4);
+      x = width * 0.5 * cosT * (1 - k * 0.45);
+      y = length * 0.55 * k * (sinT >= 0 ? 1 : -1);
+    } else {
+      // round bottom on -Y
+      x = width * 0.5 * cosT;
+      y = length * 0.45 * sinT;
+    }
+    const n = 1 + (rng() - 0.5) * noiseAmt;
+    pts.push(new THREE.Vector2(x * n, y * n));
+  }
+  return pts;
+}
+function peanutOutline(length, width, pinchAmt, segments, seed, noiseAmt = 0.07) {
+  // a long ellipse with a slight waist in the middle (matches the central
+  // sketch outline which has a peanut/dumbbell inner shape)
+  const rng = mulberry32(seed);
+  const pts = [];
+  for (let i = 0; i < segments; i++) {
+    const t = (i / segments) * Math.PI * 2;
+    const cosT = Math.cos(t), sinT = Math.sin(t);
+    const widthMod = 1 - pinchAmt * Math.exp(-(cosT * cosT) / 0.06);
+    const x = length * 0.5 * cosT;
+    const y = width * 0.5 * sinT * widthMod;
+    const n = 1 + (rng() - 0.5) * noiseAmt;
+    pts.push(new THREE.Vector2(x * n, y * n));
+  }
+  return pts;
+}
+function makeTopoSlab(outline, height, mat = rockMat) {
+  const shape = new THREE.Shape(outline);
+  const geom = new THREE.ExtrudeGeometry(shape, {
+    depth: height,
+    bevelEnabled: true,
+    bevelSize: Math.min(0.07, height * 0.25),
+    bevelThickness: Math.min(0.05, height * 0.20),
+    bevelSegments: 2,
+    curveSegments: 1
+  });
+  geom.rotateX(-Math.PI / 2);
+  // After rotateX(-PI/2) the extrusion (originally along +Z) maps to +Y,
+  // so the slab body already runs from y=0 (bottom) to y=height (top) —
+  // do NOT translate up by `height`, which previously made the slab
+  // float in the air by an amount equal to its first-layer height.
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+function makeStackedRock(layers, x, z, opts = {}) {
+  // layers: [{ outline, height, ox?, oz?, rot?, mat? }]
+  const g = new THREE.Group();
+  const rng = mulberry32(opts.seed || 1);
+  let baseY = 0;
+  for (const l of layers) {
+    const slab = makeTopoSlab(l.outline, l.height, l.mat || opts.mat || rockMat);
+    slab.position.set(l.ox || 0, baseY, l.oz || 0);
+    slab.rotation.y = (l.rot !== undefined) ? l.rot : (rng() - 0.5) * 0.5;
+    g.add(slab);
+    baseY += l.height * (0.82 + rng() * 0.10);  // small overlap for layered look
+  }
+  g.position.set(x, opts.baseY ?? -0.25, z);
+  return g;
+}
+
+// Tall, mostly-vertical pillar of stacked slabs (slight taper). Used for
+// the cliff-like rock features standing on the back grass area.
+function makeVerticalSlab(x, z, opts = {}) {
+  const { baseW=0.7, baseL=0.55, height=2.0, levels=4, taperRate=0.18, seed=1, baseY=LAND_TOP_Y - 0.05 } = opts;
+  const layers = [];
+  for (let i = 0; i < levels; i++) {
+    const t = i / Math.max(1, levels - 1);
+    const taper = 1 - t * taperRate;
+    layers.push({
+      outline: noisyEllipseOutline(baseW * taper, baseL * taper, 14 + i * 2, seed + i * 5, 0.08 + i * 0.015),
+      height: height / levels
+    });
+  }
+  return makeStackedRock(layers, x, z, { baseY, seed });
+}
+
+// Vertical pillar with a wider top "cap" — creates an overhang for shade
+// (matches the photo where some rocks behind the seals jut out on top).
+function makeOverhangSlab(x, z, opts = {}) {
+  const {
+    baseW=0.55, baseL=0.45, capW=1.0, capL=0.8,
+    height=2.0, stackLevels=3, seed=1,
+    baseY=LAND_TOP_Y - 0.05
+  } = opts;
+  const stackH = height * 0.7;
+  const capH = height * 0.3;
+  const layers = [];
+  for (let i = 0; i < stackLevels; i++) {
+    const taper = 1 - (i / stackLevels) * 0.20;
+    layers.push({
+      outline: noisyEllipseOutline(baseW * taper, baseL * taper, 14, seed + i * 3, 0.10),
+      height: stackH / stackLevels
+    });
+  }
+  // wider cap = visible overhang on all sides
+  layers.push({
+    outline: noisyEllipseOutline(capW, capL, 18, seed + 100, 0.12),
+    height: capH
+  });
+  return makeStackedRock(layers, x, z, { baseY, seed });
+}
+
+// ============================================================
+// BACK GRASS LAND — raised land mass on the +Z side of the
+// enclosure (NOT in the pool; sits behind it). Wavy front edge
+// matching the sketch's diagonal/curved boundary. Grass cap on
+// top; rocky cliff face down to the basin floor.
+// ============================================================
+const LAND_TOP_Y = 1.4;
+function grassFrontZ(x) {
+  // front edge of grass area as a wavy curve (z as a function of x)
+  return 3.6
+       + Math.sin(x * 0.42 + 0.5) * 1.1
+       + Math.sin(x * 1.10 + 0.2) * 0.55
+       + Math.sin(x * 0.21 - 0.6) * 0.35;
+}
+function isInGrass(x, z) {
+  if (!isInStadium(x, z, WALL_INNER_L, WALL_INNER_W)) return false;
+  return z >= grassFrontZ(x);
+}
+function makeBackGrassOutline() {
+  // The grass mesh is built via ShapeGeometry then rotateX(-PI/2),
+  // which maps Vector2.y -> scene -Z. To put the grass at scene +Z
+  // (the "back" per the spec), we negate y here and reverse the
+  // point order to preserve CCW winding so face normals point +Y.
+  const pts = [];
+  const R = WALL_INNER_W / 2;
+  const sh = WALL_INNER_L / 2 - R;
+  const semiSegs = 32;
+  for (let i = 0; i <= semiSegs; i++) {
+    const a = (i / semiSegs) * Math.PI / 2;
+    pts.push(new THREE.Vector2(sh + Math.cos(a) * R, -Math.sin(a) * R));
+  }
+  for (let i = 1; i <= semiSegs; i++) {
+    const a = Math.PI / 2 + (i / semiSegs) * Math.PI / 2;
+    pts.push(new THREE.Vector2(-sh + Math.cos(a) * R, -Math.sin(a) * R));
+  }
+  const innerSegs = 80;
+  for (let i = 1; i < innerSegs; i++) {
+    const t = i / innerSegs;
+    const x = -WALL_INNER_L/2 + t * WALL_INNER_L;
+    const z = Math.max(0.4, grassFrontZ(x));
+    pts.push(new THREE.Vector2(x, -z));
+  }
+  pts.reverse();
+  return pts;
+}
+const grassOutline = makeBackGrassOutline();
+const grassShape = new THREE.Shape(grassOutline);
+// back-land top mesh — rock surface (per latest user note: "make it those
+// rocks too, and keep the occasional greenery poking out")
+{
+  const geom = new THREE.ShapeGeometry(grassShape, 24);
+  geom.rotateX(-Math.PI / 2);
+  // subtle Y undulation across the rock surface
+  const pos = geom.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    const y = LAND_TOP_Y
+      + Math.sin(x * 0.4) * 0.05
+      + Math.cos(z * 0.5) * 0.05
+      + Math.sin((x + z) * 0.22) * 0.07;
+    pos.setY(i, y);
+  }
+  geom.computeVertexNormals();
+  worldUV(geom, 3, 3);
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    map: rockTex, roughness: 0.92, metalness: 0.04, side: THREE.DoubleSide
+  }));
+  mesh.receiveShadow = true;
+  mesh.castShadow = true;
+  scene.add(mesh);
+}
+// rocky cliff/skirt from grass top down to basin floor
+{
+  const sampled = grassShape.getPoints(180);
+  const samples = sampled.slice();
+  if (samples.length > 0 && !samples[0].equals(samples[samples.length - 1])) {
+    samples.push(samples[0].clone());
+  }
+  const positions = [], indices = [], uvs = [];
+  let cumDist = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const p = samples[i];
+    // outline y is negated (see makeBackGrassOutline); flip it back to scene +Z here
+    const x = p.x, z = -p.y;
+    if (i > 0) {
+      const dx = x - samples[i-1].x;
+      const dz = z - (-samples[i-1].y);
+      cumDist += Math.sqrt(dx*dx + dz*dz);
+    }
+    const topY = LAND_TOP_Y;
+    const botY = Math.min(-0.55, basinY(x, z) - 0.05);
+    positions.push(x, topY, z);
+    positions.push(x, botY, z);
+    uvs.push(cumDist / 3, 0);
+    uvs.push(cumDist / 3, (topY - botY) / 1.5);
+  }
+  for (let i = 0; i < samples.length - 1; i++) {
+    const a = i*2, b = i*2+1, c = (i+1)*2, d = (i+1)*2+1;
+    indices.push(a, c, b);
+    indices.push(b, c, d);
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+    map: rockTex, roughness: 0.92, metalness: 0.05, side: THREE.DoubleSide
+  }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+
+// ============================================================
+// ROCKS — built as stacked topo-style slabs per the sketch.
+// Layout (top-down sketch, +Z = back where the grass is):
+//   - Big central formation in the middle of the pool with
+//     rear extensions reaching back to merge with the grass land
+//   - Teardrop cluster in upper-left of pool (separate from grass)
+//   - Flat wavy rock at left-middle of pool (separate)
+//   - Tiny islet center-front of pool (separate)
+//   - 2-3 small rocks at front-right of pool (separate)
+// ============================================================
+
+// ----- CENTRAL BIG ROCK FORMATION -----
+// Long elongated stack, peanut-shaped base, with 5-6 ascending
+// slabs forming the topographic levels. Centered around (0, 0, +0.5).
+{
+  const seedBase = 1100;
+  const layers = [
+    { outline: peanutOutline(11.5, 5.0, 0.30, 40, seedBase + 1, 0.06), height: 0.55, ox: 0.0, oz: 0.0 },
+    { outline: peanutOutline( 9.5, 4.0, 0.28, 36, seedBase + 2, 0.07), height: 0.55, ox: -0.2, oz: 0.1 },
+    { outline: peanutOutline( 7.6, 3.2, 0.25, 32, seedBase + 3, 0.08), height: 0.55, ox: 0.3, oz: -0.1 },
+    { outline: peanutOutline( 5.8, 2.4, 0.22, 28, seedBase + 4, 0.09), height: 0.55, ox: -0.4, oz: 0.2 },
+    { outline: peanutOutline( 4.0, 1.6, 0.20, 24, seedBase + 5, 0.10), height: 0.50, ox: 0.5, oz: -0.2 },
+    { outline: peanutOutline( 2.4, 1.0, 0.18, 20, seedBase + 6, 0.10), height: 0.45, ox: -0.2, oz: 0.1 },
+    { outline: noisyEllipseOutline(1.0, 0.5, 16, seedBase + 7, 0.10), height: 0.40, ox: 0.2, oz: -0.1 }
+  ];
+  scene.add(makeStackedRock(layers, 0, 0.4, { baseY: -0.4, seed: seedBase }));
+}
+// Rear "tendril" extensions — connect the central formation to the
+// grass land in the back (per the sketch, ONLY the central rock connects).
+// Each tendril straddles the wavy grass-front edge: south side rises from
+// open water, north side embeds into the grass cliff and pokes above it.
+{
+  const seedBase = 1300;
+  const layers = [
+    { outline: noisyEllipseOutline(2.8, 1.7, 26, seedBase + 1, 0.10), height: 0.60 },
+    { outline: noisyEllipseOutline(2.1, 1.3, 22, seedBase + 2, 0.10), height: 0.55 },
+    { outline: noisyEllipseOutline(1.5, 0.9, 18, seedBase + 3, 0.10), height: 0.50 },
+    { outline: noisyEllipseOutline(0.9, 0.55, 14, seedBase + 4, 0.10), height: 0.45 }
+  ];
+  // grass front at x≈0.5 is ~4.5; rock at z=3.6 with z-extent ~1.7 spans
+  // z≈1.9..5.3 — crosses the front and embeds into the grass cliff.
+  scene.add(makeStackedRock(layers, 0.5, 3.6, { baseY: -0.3, seed: seedBase }));
+}
+// Second narrower tendril on the left side
+{
+  const seedBase = 1340;
+  const layers = [
+    { outline: noisyEllipseOutline(1.9, 1.1, 20, seedBase + 1, 0.12), height: 0.55 },
+    { outline: noisyEllipseOutline(1.3, 0.75, 16, seedBase + 2, 0.10), height: 0.50 },
+    { outline: noisyEllipseOutline(0.8, 0.50, 12, seedBase + 3, 0.10), height: 0.45 }
+  ];
+  // grass front at x≈-2 is ~2.4; rock at z=2.1 with z-extent ~1.1 spans
+  // z≈1.0..3.2 — crosses the front
+  scene.add(makeStackedRock(layers, -2.0, 2.1, { baseY: -0.25, seed: seedBase }));
+}
+
+// ----- FORWARD EXTENSION of the central rock toward the water edge -----
+// Per user feedback: "let the central rock come out more closer to the
+// other edge towards the water." Two stacks extending the formation in -Z.
+{
+  const seedBase = 1500;
+  scene.add(makeStackedRock([
+    { outline: noisyEllipseOutline(2.9, 1.6, 24, seedBase + 1, 0.10), height: 0.55 },
+    { outline: noisyEllipseOutline(2.1, 1.2, 20, seedBase + 2, 0.10), height: 0.50 },
+    { outline: noisyEllipseOutline(1.3, 0.8, 16, seedBase + 3, 0.10), height: 0.40 }
+  ], -1.0, -3.5, { baseY: -0.4, seed: seedBase }));
+  // a smaller, lower forward step extending further into open water
+  scene.add(makeStackedRock([
+    { outline: noisyEllipseOutline(1.6, 1.0, 20, seedBase + 11, 0.10), height: 0.40 },
+    { outline: noisyEllipseOutline(0.95, 0.6, 16, seedBase + 13, 0.10), height: 0.30 }
+  ], 1.6, -5.6, { baseY: -0.30, seed: seedBase + 10 }));
+}
+
+// ----- FLAT FEEDING PLATFORM (on the +X side per latest user note:
+// "the flat slab was good where it was, it was on the left which is
+// where i wanted it, move that back") -----
+{
+  const cx = 8.0, cz = -3.0;
+  const seedBase = 2400;
+  scene.add(makeStackedRock([
+    { outline: noisyEllipseOutline(2.7, 1.7, 26, seedBase + 1, 0.10), height: 0.55 }
+  ], cx, cz, { baseY: -0.45, seed: seedBase }));
+}
+// ============================================================
+// CAVE — oval ring of stacked slabs with a front opening + a
+// stacked dome roof on top (per user: same shape but built using
+// the slab technique so it fits in the same world as the rest).
+// ============================================================
+{
+  const cx = -5.5, cz = 0.5;       // center of the cave
+  const ringR = 1.7;                // distance from center to each wall slab
+  const gapCenter = -Math.PI / 2;   // entrance faces -Z (front of pool)
+  const gapAngle  = Math.PI / 3;    // 60° opening
+  const segments  = 6;
+  const arcSpan   = Math.PI * 2 - gapAngle;
+  const arcStart  = gapCenter + gapAngle / 2;
+
+  // Wall slabs arranged in a partial ring (oval footprint), each tangent
+  // to the ring so they read as a continuous curved wall with a hole.
+  for (let i = 0; i < segments; i++) {
+    const t = i / (segments - 1);
+    const a = arcStart + t * arcSpan;
+    const px = cx + ringR * Math.cos(a);
+    const pz = cz + ringR * Math.sin(a);
+    const slabSeed = 1750 + i * 53;
+    const layers = [
+      { outline: noisyEllipseOutline(0.95, 0.50, 18, slabSeed + 1, 0.10), height: 0.50 },
+      { outline: noisyEllipseOutline(0.78, 0.42, 16, slabSeed + 2, 0.10), height: 0.50 },
+      { outline: noisyEllipseOutline(0.62, 0.36, 14, slabSeed + 3, 0.10), height: 0.45 },
+      { outline: noisyEllipseOutline(0.50, 0.30, 12, slabSeed + 4, 0.10), height: 0.40 }
+    ];
+    const slab = makeStackedRock(layers, px, pz, { baseY: -0.30, seed: slabSeed });
+    slab.rotation.y = -(a + Math.PI / 2);  // align long axis tangent to ring
+    scene.add(slab);
+  }
+
+  // Dome roof — a stacked oval that lands ON the wall tops (which sit
+  // around y=1.55) and caps the cave. Base layer is wide enough to
+  // overhang all wall slabs so it visibly closes onto them.
+  const roofSeed = 1900;
+  const roofLayers = [
+    { outline: noisyEllipseOutline(2.9, 2.4, 24, roofSeed + 1, 0.10), height: 0.50 },
+    { outline: noisyEllipseOutline(2.2, 1.8, 20, roofSeed + 2, 0.10), height: 0.40 },
+    { outline: noisyEllipseOutline(1.4, 1.1, 16, roofSeed + 3, 0.10), height: 0.35 },
+    { outline: noisyEllipseOutline(0.7, 0.55, 14, roofSeed + 4, 0.10), height: 0.30 }
+  ];
+  // baseY = 1.45 → roof body starts 0.10m below wall tops, so it embeds
+  // visibly onto the walls instead of floating.
+  scene.add(makeStackedRock(roofLayers, cx, cz, { baseY: 1.45, seed: roofSeed }));
+}
+
+// ============================================================
+// VEGETATION ON THE BACK GRASS LAND
+// Wispy plants (tall thin tufts) + a few bare trees per the sketch
+// ============================================================
+{
+  const rng = mulberry32(5000);
+  // 3 bare trees scattered across the back grass
+  const treeSpots = [[-7.5, 7.2], [3.5, 8.4], [10.2, 6.0]];
+  treeSpots.forEach(([tx, tz], i) => {
+    if (isInGrass(tx, tz)) {
+      const tr = makeBareTree(tx, tz, { h: 3.0 + rng() * 0.8, branches: 9 + Math.floor(rng() * 4), seed: 5100 + i * 13 });
+      tr.position.y = LAND_TOP_Y - 0.02;
+      scene.add(tr);
+    }
+  });
+  // (Green wisps + low shrubs removed per user — replaced with the long
+  // yellow grass tufts below.)
+  // Long yellow grass — many tall thin cones in dry/golden tones,
+  // scattered densely "almost all over" the back rock area.
+  for (let i = 0; i < 280; i++) {
+    let x, z, ok = false;
+    for (let t = 0; t < 30 && !ok; t++) {
+      x = (rng() - 0.5) * (WALL_INNER_L - 3);
+      z = 0.8 + rng() * (WALL_INNER_W/2 - 1.0);
+      ok = isInGrass(x, z);
+    }
+    if (!ok) continue;
+    const h = 0.55 + rng() * 0.7;
+    const grass = new THREE.Mesh(
+      new THREE.ConeGeometry(0.06 + rng() * 0.05, h, 5),
+      new THREE.MeshStandardMaterial({
+        // hue ~ golden yellow, fairly saturated, medium-light
+        color: new THREE.Color().setHSL(0.12 + rng() * 0.05, 0.65 + rng() * 0.20, 0.50 + rng() * 0.12),
+        roughness: 1, flatShading: true
+      })
+    );
+    grass.position.set(x, LAND_TOP_Y + h * 0.5 - 0.05, z);
+    grass.scale.x = 0.30 + rng() * 0.20;
+    grass.scale.z = 0.30 + rng() * 0.20;
+    grass.rotation.y = rng() * Math.PI;
+    grass.rotation.x = (rng() - 0.5) * 0.20;
+    grass.castShadow = true;
+    scene.add(grass);
+  }
+}
+
+// ============================================================
+// SEAL SIGN — long sign mounted on the front-railing section
+// (front of pool, opposite side from where the rocks are)
+// ============================================================
+{
+  const signZ = -(WALL_OUTER_W / 2);  // hang on the outside of the front railing
+  const railTopY = DECK_TOP_Y + WALL_HEIGHT + 0.95;
+  const railMidY = DECK_TOP_Y + WALL_HEIGHT + 0.55;
+  const signHeight = railTopY - railMidY + 0.10;
+  const signWidth = 5.5;
+  const signY = (railTopY + railMidY) / 2;
+  // Sign panel — flat box mounted between the rails on the front side
+  const sign = new THREE.Mesh(
+    new THREE.BoxGeometry(signWidth, signHeight, 0.04),
+    new THREE.MeshStandardMaterial({ color: 0x274a78, roughness: 0.6, metalness: 0.05 })
+  );
+  sign.position.set(0, signY, signZ - 0.06);
+  sign.castShadow = true;
+  sign.receiveShadow = true;
+  scene.add(sign);
+  // Thin lighter top rail accent on the sign (visual band)
+  const accent = new THREE.Mesh(
+    new THREE.BoxGeometry(signWidth * 0.96, 0.06, 0.05),
+    new THREE.MeshStandardMaterial({ color: 0xeae6dc, roughness: 0.7 })
+  );
+  accent.position.set(0, signY + signHeight * 0.40, signZ - 0.07);
+  scene.add(accent);
+}
+
+// ============================================================
+// BACK ROCK FORMATIONS on the back rock area
+// Side pillars (kept) + a big "mountain" of stacked slabs in the
+// middle (replaces the previous two middle pillars). Mountain is
+// taller and more "full" — bigger slabs on slabs.
+// ============================================================
+{
+  // Side pillars on the corners and shoulders (corner rocks pulled inward
+  // so they don't poke past the wall inner stadium curve)
+  scene.add(makeVerticalSlab(-10.0, 7.2, { baseW: 0.95, baseL: 0.7, height: 2.6, levels: 5, seed: 6001 }));
+  scene.add(makeOverhangSlab(-7.5,  9.0, { baseW: 0.55, baseL: 0.45, capW: 1.20, capL: 0.95, height: 2.4, seed: 6011 }));
+  scene.add(makeVerticalSlab( 5.5, 8.5, { baseW: 0.80, baseL: 0.60, height: 2.0, levels: 4, seed: 6041 }));
+  scene.add(makeVerticalSlab( 8.0, 8.5, { baseW: 0.85, baseL: 0.65, height: 2.3, levels: 5, seed: 6051 }));
+  scene.add(makeOverhangSlab( 9.5, 7.0, { baseW: 0.50, baseL: 0.40, capW: 0.95, capL: 0.75, height: 1.9, seed: 6061 }));
+
+  // BIG "MOUNTAIN" — replaces the two former middle pillars at -3.5 and 1.5
+  // 7 stacked slabs (peanut + ellipse outlines), much wider footprint and
+  // taller than the previous pillars, tapering up to a peak.
+  const mountainLayers = [
+    { outline: peanutOutline(7.2, 2.8, 0.20, 32, 6500, 0.07), height: 0.65 },
+    { outline: peanutOutline(6.0, 2.4, 0.18, 28, 6502, 0.08), height: 0.60 },
+    { outline: peanutOutline(4.8, 1.9, 0.16, 24, 6504, 0.08), height: 0.55 },
+    { outline: peanutOutline(3.6, 1.5, 0.14, 22, 6506, 0.09), height: 0.50 },
+    { outline: noisyEllipseOutline(2.6, 1.1, 20, 6508, 0.10), height: 0.45 },
+    { outline: noisyEllipseOutline(1.6, 0.7, 16, 6510, 0.10), height: 0.40 },
+    { outline: noisyEllipseOutline(0.8, 0.4, 14, 6512, 0.10), height: 0.32 }
+  ];
+  scene.add(makeStackedRock(mountainLayers, -1.0, 9.0, { baseY: LAND_TOP_Y - 0.10, seed: 6500 }));
+}
+
+// ============================================================
+// FRONT TOPO MOUNTAIN — extends from the back rock land outward
+// into the water as a multi-tier mountain. 8 stepped layers with
+// varying noise and slight asymmetric offsets so each level feels
+// natural rather than perfectly centered.
+// ============================================================
+{
+  const cx = -0.9, cz = 5.8;  // pulled south so the base reaches well into the water
+  const seedBase = 6800;
+  const layers = [
+    // Big base — pulled forward, wider in both axes
+    { outline: peanutOutline(10.0, 7.8, 0.22, 36, seedBase + 1, 0.08), height: 0.70, ox:  0.0, oz: 0.0  },
+    { outline: peanutOutline( 8.4, 6.4, 0.20, 32, seedBase + 2, 0.09), height: 0.65, ox:  0.3, oz: 0.5  },
+    { outline: peanutOutline( 6.9, 5.2, 0.18, 28, seedBase + 3, 0.10), height: 0.58, ox: -0.4, oz: 0.7  },
+    { outline: peanutOutline( 5.5, 4.0, 0.16, 24, seedBase + 4, 0.11), height: 0.52, ox:  0.5, oz: 0.95 },
+    { outline: noisyEllipseOutline(4.1, 3.0, 22, seedBase + 5, 0.13), height: 0.48, ox: -0.4, oz: 1.15 },
+    { outline: noisyEllipseOutline(2.8, 2.0, 18, seedBase + 6, 0.13), height: 0.42, ox:  0.3, oz: 1.30 },
+    { outline: noisyEllipseOutline(1.7, 1.1, 16, seedBase + 7, 0.13), height: 0.38, ox: -0.1, oz: 1.45 },
+    { outline: noisyEllipseOutline(0.8, 0.50, 14, seedBase + 8, 0.10), height: 0.30, ox:  0.1, oz: 1.55 }
+  ];
+  scene.add(makeStackedRock(layers, cx, cz, { baseY: -0.30, seed: seedBase }));
+}
+
+// ============================================================
+// MINI ISLAND ENCLOSURE on the back-LEFT of the grass
+// Per the second reference photo (151923): a small enclosed nook
+// formed by low land-rocks with taller slabs jutting out around it.
+// "A bit of the green area has land rocks instead of slabs."
+// ============================================================
+{
+  // Low land-rocks (the "land rocks instead of slabs")
+  scene.add(makeStackedRock([
+    { outline: noisyEllipseOutline(0.85, 0.70, 18, 7001, 0.14), height: 0.40 },
+    { outline: noisyEllipseOutline(0.55, 0.45, 14, 7003, 0.10), height: 0.30 }
+  ], -10.5, 6.4, { baseY: LAND_TOP_Y - 0.05, seed: 7000 }));
+  scene.add(makeStackedRock([
+    { outline: noisyEllipseOutline(0.65, 0.55, 16, 7011, 0.13), height: 0.35 }
+  ], -8.5, 5.6, { baseY: LAND_TOP_Y - 0.05, seed: 7010 }));
+  scene.add(makeStackedRock([
+    { outline: noisyEllipseOutline(0.50, 0.45, 14, 7021, 0.12), height: 0.28 }
+  ], -12.0, 5.5, { baseY: LAND_TOP_Y - 0.05, seed: 7020 }));
+  // Tall slabs jutting out around the cluster — give it the enclosed feel
+  scene.add(makeVerticalSlab(-12.2, 6.8, { baseW: 0.55, baseL: 0.45, height: 1.7, levels: 4, seed: 7100 }));
+  scene.add(makeVerticalSlab(-10.0, 5.0, { baseW: 0.50, baseL: 0.40, height: 1.5, levels: 4, seed: 7110 }));
+  scene.add(makeOverhangSlab( -9.0, 7.0, { baseW: 0.45, baseL: 0.35, capW: 0.85, capL: 0.70, height: 1.8, seed: 7120 }));
+}
+
+// (Pebbles + floating leaves removed — keeping the pool clean
+// around the three main rock areas per the latest feedback.)
+
+// ============================================================
+// RESIZE
+// ============================================================
+// ============================================================
+// MOUSE COORDINATE READOUT
+// Casts a ray through the cursor onto the water plane (y=0) and
+// shows the world-space (x, z) in the HUD so you can read off the
+// position of any feature you hover.
+// ============================================================
+{
+  const coordHud = document.getElementById('coord-hud');
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  const waterPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const hit = new THREE.Vector3();
+  renderer.domElement.addEventListener('mousemove', (e) => {
+    const rect = renderer.domElement.getBoundingClientRect();
+    ndc.x =  ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+    raycaster.setFromCamera(ndc, camera);
+    if (raycaster.ray.intersectPlane(waterPlane, hit)) {
+      coordHud.textContent = `x: ${hit.x.toFixed(1)}   z: ${hit.z.toFixed(1)}`;
+    } else {
+      coordHud.textContent = 'x: --  z: --';
+    }
+  });
+  renderer.domElement.addEventListener('mouseleave', () => {
+    coordHud.textContent = 'x: --  z: --';
+  });
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ============================================================
+// ANIMATE
+// ============================================================
+const clock = new THREE.Clock();
+function animate() {
+  const t = clock.getElapsedTime();
+  waterMat.uniforms.time.value = t;
+  waterMat.uniforms.camPos.value.copy(camera.position);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>
